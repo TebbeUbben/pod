@@ -36,6 +36,7 @@ type Ble struct {
 
 	messageInput  chan *message.Message
 	messageOutput chan *message.Message
+	disconnected  chan struct{}
 
 	stopLoop chan bool
 	device   *gatt.Device
@@ -71,6 +72,7 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		cmdOutput:     make(chan Packet, 5),
 		messageInput:  make(chan *message.Message, 5),
 		messageOutput: make(chan *message.Message, 2),
+		disconnected:  make(chan struct{}, 1),
 		device:        &d,
 	}
 
@@ -82,6 +84,10 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		gatt.CentralDisconnected(func(c gatt.Central) {
 			log.Tracef("pkg bluetooth; ** disconnect: %s", c.ID())
 			b.central = nil
+			select {
+			case b.disconnected <- struct{}{}:
+			default:
+			}
 		}),
 	)
 
@@ -280,6 +286,19 @@ func (b *Ble) ReadMessageWithTimeout(d time.Duration) (*message.Message, bool) {
 	case <-time.After(d):
 		log.Debugf("ReadMessage timeout")
 		return nil, true
+	}
+}
+
+func (b *Ble) ReadMessageWithTimeoutOrDisconnect(d time.Duration) (*message.Message, bool, bool) {
+	select {
+	case message := <-b.messageInput:
+		return message, false, false
+	case <-time.After(d):
+		log.Debugf("ReadMessage timeout")
+		return nil, true, false
+	case <-b.disconnected:
+		log.Debugf("ReadMessage interrupted by disconnect")
+		return nil, false, true
 	}
 }
 
