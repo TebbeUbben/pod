@@ -38,11 +38,14 @@ type PODState struct {
 
 	// At some point these could be replaced with details
 	// of each kind of delivery (volume, start time, schedule, etc)
-	BolusEnd            time.Time `toml:"bolus_end"`
-	BolusCanceledAt     time.Time `toml:"bolus_canceled_at"`
-	TempBasalEnd        time.Time `toml:"temp_basal_end"`
-	ExtendedBolusActive bool      `toml:"extended_bolus_active"`
-	BasalActive         bool      `toml:"basal_active"`
+	BolusStart          time.Time     `toml:"bolus_start"`
+	BolusEnd            time.Time     `toml:"bolus_end"`
+	BolusPulseInterval  time.Duration `toml:"bolus_pulse_interval"`
+	BolusTotalPulses    uint16        `toml:"bolus_total_pulses"`
+	BolusCanceledAt     time.Time     `toml:"bolus_canceled_at"`
+	TempBasalEnd        time.Time     `toml:"temp_basal_end"`
+	ExtendedBolusActive bool          `toml:"extended_bolus_active"`
+	BasalActive         bool          `toml:"basal_active"`
 
 	Filename string
 }
@@ -74,20 +77,49 @@ func (p *PODState) MinutesActive() uint16 {
 	return uint16(time.Now().Sub(p.ActivationTime).Round(time.Minute).Minutes())
 }
 
-// NOTE: only handles immediate boluses; any extended bolus is not accounted for
-func (p *PODState) BolusRemaining() uint16 {
-	now := time.Now()
-	var secondsPerPulse uint16
-	if p.BolusEnd.After(now) {
-		// Add one so the response for a bolus command has a bolus remaining value that matches the bolus size
-		bolusSecondsRemaining := uint16(p.BolusEnd.Sub(now).Seconds() + 1)
-		if p.PodProgress > response.PodProgressInsertingCannula {
-			secondsPerPulse = 2 // normal immediate bolus rate
-		} else {
-			secondsPerPulse = 1 // pod setup bolus rate
-		}
-		return bolusSecondsRemaining / secondsPerPulse
-	} else {
+// bolusDeliveredPulses returns the number of bolus pulses delivered so far,
+// capped at the total commanded pulses. The delivered count is based on elapsed
+// time since bolus start, limited to (BolusEnd - BolusStart).
+func (p *PODState) bolusDeliveredPulses() uint16 {
+	if p.BolusStart.IsZero() || p.BolusPulseInterval == 0 {
 		return 0
 	}
+	now := time.Now()
+	elapsed := now.Sub(p.BolusStart)
+	maxElapsed := p.BolusEnd.Sub(p.BolusStart)
+	if elapsed > maxElapsed {
+		elapsed = maxElapsed
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	delivered := uint16(elapsed / p.BolusPulseInterval)
+	if delivered > p.BolusTotalPulses {
+		delivered = p.BolusTotalPulses
+	}
+	return delivered
+}
+
+// NOTE: only handles immediate boluses; any extended bolus is not accounted for
+func (p *PODState) BolusRemaining() uint16 {
+	if p.BolusStart.IsZero() || p.BolusTotalPulses == 0 {
+		return 0
+	}
+	delivered := p.bolusDeliveredPulses()
+	if delivered >= p.BolusTotalPulses {
+		return 0
+	}
+	return p.BolusTotalPulses - delivered
+}
+
+// CurrentDelivered returns the total delivered pulses including any currently
+// active bolus pulses delivered so far.
+func (p *PODState) CurrentDelivered() uint16 {
+	return p.Delivered + p.bolusDeliveredPulses()
+}
+
+// CurrentReservoir returns the current reservoir level accounting for any
+// pulses delivered by the currently active bolus.
+func (p *PODState) CurrentReservoir() uint16 {
+	return p.Reservoir - p.bolusDeliveredPulses()
 }
