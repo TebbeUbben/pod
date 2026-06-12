@@ -27,6 +27,16 @@ func buildNonce(noncePrefix []byte, seq uint64, podReceiving bool) []byte {
 }
 
 func DecryptMessage(ck, noncePrefix []byte, seq uint64, msg *message.Message) (*message.Message, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("could not decrypt: empty message")
+	}
+	if len(msg.Raw) < 16 {
+		return nil, fmt.Errorf("could not decrypt: raw message too short: %d", len(msg.Raw))
+	}
+	if len(msg.Payload) < 8 {
+		return nil, fmt.Errorf("could not decrypt: payload too short for AES-CCM tag: %d", len(msg.Payload))
+	}
+
 	log.Tracef("using CK:    %x", ck)
 	nonce := buildNonce(noncePrefix, seq, true)
 	log.Tracef("decrypt: using nonce: %x :: %d", nonce, len(nonce))

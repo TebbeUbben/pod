@@ -224,6 +224,10 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 			return
 		}
 		log.Tracef("pkg pod; got command message: %s", spew.Sdump(msg))
+		if len(msg.Payload) < 8 {
+			log.Warnf("pkg pod; ignoring non-encrypted or short command payload: %x", msg.Payload)
+			continue
+		}
 
 		if msg.SequenceNumber == lastMsgSeq {
 			// this is a retry because we did not answer yet
@@ -237,7 +241,9 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 
 		decrypted, err := encrypt.DecryptMessage(p.state.CK, p.state.NoncePrefix, p.state.NonceSeq, msg)
 		if err != nil {
-			log.Fatalf("pkg pod; could not decrypt message: %s", err)
+			p.mtx.Unlock()
+			log.Warnf("pkg pod; could not decrypt command message: %s", err)
+			continue
 		}
 		p.state.NonceSeq++
 
@@ -312,14 +318,23 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 
 		log.Debugf("pkg pod; reading response ACK. Nonce seq %d", p.state.NonceSeq)
 		msg, _ = p.ble.ReadMessage()
+		if len(msg.Payload) < 8 {
+			log.Debugf("pkg pod; ignoring non-encrypted ACK/control payload: %x", msg.Payload)
+			p.mtx.Unlock()
+			log.Debugf("notifyingStateChange")
+			p.notifyStateChange()
+			continue
+		}
 		// TODO check for SEQ numbers here and the Ack flag
 		decrypted, err = encrypt.DecryptMessage(p.state.CK, p.state.NoncePrefix, p.state.NonceSeq, msg)
 		if err != nil {
-			log.Fatalf("pkg pod; could not decrypt message: %s", err)
+			p.mtx.Unlock()
+			log.Warnf("pkg pod; could not decrypt ACK message: %s", err)
+			continue
 		}
 		p.state.NonceSeq++
 		if len(decrypted.Payload) != 0 {
-			log.Fatalf("pkg pod; this should be empty message with ACK header %s", spew.Sdump(msg))
+			log.Warnf("pkg pod; expected empty ACK payload, got %s", spew.Sdump(msg))
 		}
 		p.state.Save()
 		p.mtx.Unlock()
