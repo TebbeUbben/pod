@@ -26,6 +26,7 @@ var (
 	CmdAbort   = Packet([]byte{3})
 	CmdSuccess = Packet([]byte{4})
 	CmdFail    = Packet([]byte{5})
+	errUnexpectedCommand = errors.New("unexpected command while reading message")
 )
 
 type Ble struct {
@@ -38,9 +39,10 @@ type Ble struct {
 	messageOutput chan *message.Message
 	disconnected  chan struct{}
 
-	stopLoop chan bool
-	device   *gatt.Device
-	central  *gatt.Central
+	stopLoop    chan bool
+	stopLoopMtx sync.Mutex
+	device      *gatt.Device
+	central     *gatt.Central
 
 	cmdNotifier    gatt.Notifier
 	cmdNotifierMtx sync.Mutex
@@ -84,10 +86,7 @@ func New(adapterID string, podId []byte) (*Ble, error) {
 		gatt.CentralDisconnected(func(c gatt.Central) {
 			log.Tracef("pkg bluetooth; ** disconnect: %s", c.ID())
 			b.central = nil
-			select {
-			case b.disconnected <- struct{}{}:
-			default:
-			}
+			b.signalDisconnect()
 		}),
 	)
 
@@ -302,6 +301,13 @@ func (b *Ble) ReadMessageWithTimeoutOrDisconnect(d time.Duration) (*message.Mess
 	}
 }
 
+func (b *Ble) signalDisconnect() {
+	select {
+	case b.disconnected <- struct{}{}:
+	default:
+	}
+}
+
 func (b *Ble) ShutdownConnection() {
 	if b.central == nil {
 		return
@@ -324,6 +330,11 @@ func (b *Ble) loop(stop chan bool) {
 			msg, err := b.readMessage(cmd)
 			if err != nil {
 				log.Warnf("pkg bluetooth; error reading message: %s", err)
+				if errors.Is(err, errUnexpectedCommand) {
+					b.signalDisconnect()
+					b.StopMessageLoop()
+					return
+				}
 				continue
 			}
 			b.messageInput <- msg
@@ -332,6 +343,8 @@ func (b *Ble) loop(stop chan bool) {
 }
 
 func (b *Ble) StartMessageLoop() {
+	b.stopLoopMtx.Lock()
+	defer b.stopLoopMtx.Unlock()
 	if b.stopLoop != nil {
 		log.Fatalf("pkg bluetooth; Messaging loop is already running")
 	}
@@ -340,7 +353,8 @@ func (b *Ble) StartMessageLoop() {
 }
 
 func (b *Ble) StopMessageLoop() {
-	// race condition, but this is called only on device disconnect
+	b.stopLoopMtx.Lock()
+	defer b.stopLoopMtx.Unlock()
 	if b.stopLoop != nil {
 		close(b.stopLoop)
 		b.stopLoop = nil
@@ -445,7 +459,7 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 
 	log.Trace("pkg bluetooth; Reading RTS")
 	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
-		return nil, fmt.Errorf("expected command: %x, received command: %x", CmdRTS, cmd)
+		return nil, fmt.Errorf("%w: expected command: %x, received command: %x", errUnexpectedCommand, CmdRTS, cmd)
 	}
 	log.Trace("pkg bluetooth; Sending CTS")
 
