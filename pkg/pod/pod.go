@@ -284,15 +284,6 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 			p.state.Id = uniqueId
 		}
 
-		switch c := cmd.(type) {
-		case *command.StopDelivery:
-			// Need to clear BolusEnd *after* response is generated, as it is used
-			// to calculate remaining
-			if c.StopBolus {
-				p.state.BolusEnd = time.Time{}
-			}
-		}
-
 		p.state.MsgSeq++
 		p.state.CmdSeq++
 		p.state.Save()
@@ -344,14 +335,14 @@ func (p *Pod) makeGeneralStatusResponse() response.Response {
 
 	return &response.GeneralStatusResponse {
 		LastProgSeqNum:      p.state.LastProgSeqNum,
-		Reservoir:           p.state.Reservoir,
+		Reservoir:           p.state.CurrentReservoir(),
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
 		TempBasalActive:     p.state.TempBasalEnd.After(now),
 		BasalActive:         p.state.BasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
-		Delivered:           p.state.Delivered,
+		Delivered:           p.state.CurrentDelivered(),
 		BolusRemaining:      p.state.BolusRemaining(),
 		MinutesActive:       p.state.MinutesActive(),
 	}
@@ -363,14 +354,14 @@ func (p *Pod) makeDetailedStatusResponse() response.Response {
 
 	return &response.DetailedStatusResponse {
 		LastProgSeqNum:      p.state.LastProgSeqNum,
-		Reservoir:           p.state.Reservoir,
+		Reservoir:           p.state.CurrentReservoir(),
 		Alerts:              p.state.ActiveAlertSlots,
 		BolusActive:         p.state.BolusEnd.After(now),
 		TempBasalActive:     p.state.TempBasalEnd.After(now),
 		BasalActive:         p.state.BasalActive,
 		ExtendedBolusActive: p.state.ExtendedBolusActive,
 		PodProgress:         p.state.PodProgress,
-		Delivered:           p.state.Delivered,
+		Delivered:           p.state.CurrentDelivered(),
 		BolusRemaining:      p.state.BolusRemaining(),
 		MinutesActive:       p.state.MinutesActive(),
 		FaultEvent:          p.state.FaultEvent,
@@ -526,21 +517,30 @@ func (p *Pod) handleCommand(cmd command.Command) {
 			p.state.TempBasalEnd = time.Now().Add(time.Duration(c.Duration) * time.Hour / 2)
 		}
 
-		// Programming bolus; just immediately decrement reservoir
-		// Would be nice to eventually simulate actual pulses over time.
+		// Programming bolus; set up time-based tracking
 		if c.TableNum == 2 {
-			p.state.Delivered += c.Pulses
-			p.state.Reservoir -= c.Pulses
+			// Finalize any previously active bolus into the base counters first
+			prevDelivered := p.state.bolusDeliveredPulses()
+			p.state.Delivered += prevDelivered
+			p.state.Reservoir -= prevDelivered
+
+			now := time.Now()
+			var pulseInterval time.Duration
 			if p.state.PodProgress >= response.PodProgressRunningAbove50U {
-				p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second * 2)
+				pulseInterval = 2 * time.Second // normal immediate bolus rate
 			} else {
-				p.state.BolusEnd = time.Now().Add(time.Duration(c.Pulses) * time.Second) // one sec/pulse during pod setup
+				pulseInterval = 1 * time.Second // pod setup bolus rate
 			}
+			p.state.BolusStart = now
+			p.state.BolusPulseInterval = pulseInterval
+			p.state.BolusTotalPulses = c.Pulses
+			p.state.BolusEnd = now.Add(time.Duration(c.Pulses) * pulseInterval)
 		}
 
 	case *command.StopDelivery: // 0x1F
 		if c.StopBolus {
 			p.state.ExtendedBolusActive = false
+			p.state.BolusEnd = time.Now()
 		}
 		if c.StopTempBasal {
 			p.state.TempBasalEnd = time.Time{}
