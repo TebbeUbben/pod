@@ -301,7 +301,8 @@ func (b *Ble) loop(stop chan bool) {
 		case cmd := <-b.cmdInput:
 			msg, err := b.readMessage(cmd)
 			if err != nil {
-				log.Fatalf("pkg bluetooth; error reading message: %s", err)
+				log.Warnf("pkg bluetooth; error reading message: %s", err)
+				continue
 			}
 			b.messageInput <- msg
 		}
@@ -324,11 +325,13 @@ func (b *Ble) StopMessageLoop() {
 	}
 }
 
-func (b *Ble) expectCommand(expected Packet) {
+func (b *Ble) expectCommand(expected Packet) bool {
 	cmd, _ := b.ReadCmd()
 	if !bytes.Equal(expected[:1], cmd[:1]) {
-		log.Fatalf("pkg bluetooth; expected command: %s. received command: %s", expected, cmd)
+		log.Warnf("pkg bluetooth; expected command: %s. received command: %s", expected, cmd)
+		return false
 	}
+	return true
 }
 
 func (b *Ble) writeMessage(msg *message.Message) {
@@ -336,7 +339,9 @@ func (b *Ble) writeMessage(msg *message.Message) {
 	var index = 0
 
 	b.WriteCmd(CmdRTS)
-	b.expectCommand(CmdCTS) // TODO figure out what to do if !CTS
+	if !b.expectCommand(CmdCTS) { // TODO figure out what to do if !CTS
+		return
+	}
 	bytes, err := msg.Marshal()
 	if err != nil {
 		log.Fatalf("pkg bluetooth; could not marshal the message %s", err)
@@ -418,7 +423,7 @@ func (b *Ble) readMessage(cmd Packet) (*message.Message, error) {
 
 	log.Trace("pkg bluetooth; Reading RTS")
 	if !bytes.Equal(CmdRTS[:1], cmd[:1]) {
-		log.Fatalf("pkg bluetooth; expected command: %x. received command: %x", CmdRTS, cmd)
+		return nil, fmt.Errorf("expected command: %x, received command: %x", CmdRTS, cmd)
 	}
 	log.Trace("pkg bluetooth; Sending CTS")
 
