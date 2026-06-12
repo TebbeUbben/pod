@@ -216,6 +216,7 @@ func (p *Pod) CommandLoop(pMsg PodMsgBody) {
 		log.Infof("pkg pod;   *** Waiting for the next command ***")
 		msg, didTimeout := p.ble.ReadMessageWithTimeout(3 * time.Minute)
 		if didTimeout {
+			p.ble.StopMessageLoop()
 			p.ble.ShutdownConnection()
 			go func() {
 				p.StartAcceptingCommands()
